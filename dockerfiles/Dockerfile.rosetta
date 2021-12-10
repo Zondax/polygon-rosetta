@@ -12,39 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Compile golang 
-FROM ubuntu:20.04 as golang-builder
-
-RUN mkdir -p /app \
-  && chown -R nobody:nogroup /app
-WORKDIR /app
-
-# Set timezone:
-RUN ln -snf /usr/share/zoneinfo/$CONTAINER_TIMEZONE /etc/localtime && echo $CONTAINER_TIMEZONE > /etc/timezone
-
-RUN apt-get update && apt-get install -y build-essential curl make gcc g++ git fio cmake clang
-ENV GOLANG_VERSION 1.17.4
-ENV GOLANG_DOWNLOAD_SHA256 adab2483f644e2f8a10ae93122f0018cef525ca48d0b8764dae87cb5f4fd4206
-ENV GOLANG_DOWNLOAD_URL https://golang.org/dl/go$GOLANG_VERSION.linux-amd64.tar.gz
-
-RUN curl -fsSL "$GOLANG_DOWNLOAD_URL" -o golang.tar.gz \
-  && echo "$GOLANG_DOWNLOAD_SHA256  golang.tar.gz" | sha256sum -c - \
-  && tar -C /usr/local -xzf golang.tar.gz \
-  && rm golang.tar.gz
-
-ENV GOPATH /go
-ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
-RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
-
-# Compile polygon-rosetta
-FROM golang-builder as rosetta-builder
+# Build rosetta-polygon
+FROM golang:1.17 as rosetta-builder
 
 # Use native remote build context to build in any directory
 COPY . src 
 RUN cd src \
   && go build
 
-RUN mv src/polygon-rosetta /app/polygon-rosetta \
+RUN mkdir /app \ 
+  && mv src/polygon-rosetta /app/polygon-rosetta \
   && mkdir /app/polygon \
   && mv src/polygon/call_tracer.js /app/polygon/call_tracer.js \
   && mv src/polygon/geth.toml /app/polygon/geth.toml \
