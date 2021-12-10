@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"time"
 
-	BorTypes "github.com/maticnetwork/polygon-rosetta/polygon/types"
 	RosettaTypes "github.com/coinbase/rosetta-sdk-go/types"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -40,6 +39,7 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
+	BorTypes "github.com/maticnetwork/polygon-rosetta/polygon/types"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/maticnetwork/polygon-rosetta/polygon/utilities/artifacts"
@@ -179,7 +179,11 @@ func (ec *Client) PendingNonceAt(ctx context.Context, account common.Address) (u
 
 // SuggestGasPrice retrieves the currently suggested gas price to allow a timely
 // execution of a transaction.
-func (ec *Client) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+func (ec *Client) SuggestGasPrice(ctx context.Context, gasPrice *big.Int) (*big.Int, error) {
+	if gasPrice != nil {
+		return gasPrice, nil
+	}
+
 	var hex hexutil.Big
 	if err := ec.c.CallContext(ctx, &hex, "eth_gasPrice"); err != nil {
 		return nil, err
@@ -1058,8 +1062,6 @@ func (ec *Client) populateTransactions(
 	return transactions, nil
 }
 
-// populateTransaction is similar in layout to:
-// https://github.cbhq.net/c3/chainstdio/blob/32e504193cac2d11b194f530f075121ca5ea1308/pkg/blockchain/geth.go#L705
 func (ec *Client) populateTransaction(
 	ctx context.Context,
 	tx *loadedTransaction,

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Compile rosetta-polygon
+# Build rosetta-polygon
 FROM golang:1.17 as rosetta-builder
 
 # Use native remote build context to build in any directory
@@ -20,10 +20,8 @@ COPY . src
 RUN cd src \
   && go build
 
-RUN ls /
-
 RUN mkdir /app \ 
-  && mv src/polygon-rosetta /app/rosetta-polygon \
+  && mv src/polygon-rosetta /app/polygon-rosetta \
   && mkdir /app/polygon \
   && mv src/polygon/call_tracer.js /app/polygon/call_tracer.js \
   && mv src/polygon/geth.toml /app/polygon/geth.toml \
@@ -43,9 +41,9 @@ WORKDIR /app
 
 # Copy binary from rosetta-builder
 COPY --from=rosetta-builder /app/polygon /app/polygon
-COPY --from=rosetta-builder /app/rosetta-polygon /app/rosetta-polygon
+COPY --from=rosetta-builder /app/polygon-rosetta /app/polygon-rosetta
 
 # Set permissions for everything added to /app
 RUN chmod -R 755 /app/*
 
-CMD ["/app/rosetta-polygon", "run"]
+CMD ["/app/polygon-rosetta", "run"]

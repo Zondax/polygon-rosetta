@@ -40,11 +40,18 @@ build-local:
 build-rosetta-local-bin:
 	mkdir -p $(BUILD_TARGET) && GO build -o $(BUILD_TARGET) $(BUILD_SOURCE)
 
-###############
-#### update ###
-###############
-update-tracer:
-	curl https://raw.githubusercontent.com/ethereum/go-ethereum/master/eth/tracers/internal/tracers/call_tracer.js -o polygon/call_tracer.js
+################
+#### update ####
+################
+
+# This is the default JS tracer
+update-tracer-js:
+	curl https://raw.githubusercontent.com/ethereum/go-ethereum/master/eth/tracers/js/internal/tracers/call_tracer_js.js -o polygon/call_tracer.js
+
+update-tracer-legacy:
+	curl https://raw.githubusercontent.com/ethereum/go-ethereum/master/eth/tracers/js/internal/tracers/call_tracer_legacy.js -o polygon/call_tracer_legacy.js
+
+# TODO: add native tracer as well
 
 update-bootstrap-balances:
 	go run main.go utils:generate-bootstrap polygon/genesis_files/mainnet.json rosetta-cli-conf/mainnet/bootstrap_balances.json;
@@ -117,9 +124,6 @@ format:
 check-format:
 	! gofmt -s -l . | read
 	! ${GOIMPORTS_CMD} -l . | read
-
-salus:
-	docker run --rm -t -v ${PWD}:/home/repo coinbase/salus
 
 spellcheck:
 	${SPELLCHECK_CMD} -error .
