@@ -25,9 +25,9 @@ import (
 
 	lru "github.com/hashicorp/golang-lru"
 
-	"github.com/maticnetwork/polygon-rosetta/polygon/utilities/artifacts"
 	RosettaTypes "github.com/coinbase/rosetta-sdk-go/types"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/maticnetwork/polygon-rosetta/polygon/utilities/artifacts"
 )
 
 const (
@@ -135,6 +135,12 @@ func (ecf ERC20CurrencyFetcher) fetchCurrency(
 	// If the decodedDecimals byte slice has a non-zero length, parse it as an Int. Otherwise, let decimals default to 0.
 	if len(decodedDecimals) > 0 {
 		decimalsBigInt, err = parseIntReturn(artifacts.ERC20ABI, "decimals", decodedDecimals)
+
+		if decimalsBigInt.Cmp(big.NewInt(0x7FFFFFFF)) == 1 {
+			// if it cannot be casted into int32 (due to overflow), default to 0
+			decimalsBigInt = big.NewInt(0)
+		}
+
 		if err != nil {
 			return nil, err
 		}

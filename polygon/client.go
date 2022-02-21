@@ -24,6 +24,7 @@ import (
 	"math/big"
 	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"time"
 
@@ -34,7 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	EthTypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/eth"
+	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -59,6 +60,10 @@ const (
 	// that do not contain 3 topics and who's `data` field is not a single 32 byte hex string
 	// representing the amount of the transfer
 	numTopicsERC20Transfer = 3
+
+	// eip1559TxType is the EthTypes.Transaction.Type() value that indicates this transaction
+	// follows EIP-1559.
+	eip1559TxType = 2
 )
 
 // Client allows for querying a set of specific Ethereum endpoints in an
@@ -68,7 +73,7 @@ const (
 // Client borrows HEAVILY from https://github.com/ethereum/go-ethereum/tree/master/ethclient.
 type Client struct {
 	p  *params.ChainConfig
-	tc *eth.TraceConfig
+	tc *tracers.TraceCallConfig
 
 	c JSONRPC
 	g GraphQL
@@ -78,18 +83,28 @@ type Client struct {
 	traceSemaphore *semaphore.Weighted
 
 	skipAdminCalls bool
+
+	burntContract map[string]string
+}
+
+type ClientConfig struct {
+	URL            string
+	ChainConfig    *params.ChainConfig
+	SkipAdminCalls bool
+	Headers        []*HTTPHeader
+	BurntContract  map[string]string
 }
 
 // NewClient creates a Client that from the provided url and params.
-func NewClient(url string, params *params.ChainConfig, skipAdminCalls bool, headers []*HTTPHeader) (*Client, error) {
-	c, err := rpc.DialHTTPWithClient(url, &http.Client{
+func NewClient(cfg *ClientConfig) (*Client, error) {
+	c, err := rpc.DialHTTPWithClient(cfg.URL, &http.Client{
 		Timeout: gethHTTPTimeout,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: unable to dial node", err)
 	}
 
-	for _, header := range headers {
+	for _, header := range cfg.Headers {
 		c.SetHeader(header.Key, header.Value)
 	}
 
@@ -98,7 +113,7 @@ func NewClient(url string, params *params.ChainConfig, skipAdminCalls bool, head
 		return nil, fmt.Errorf("%w: unable to load trace config", err)
 	}
 
-	g, err := newGraphQLClient(url, headers)
+	g, err := newGraphQLClient(cfg.URL, cfg.Headers)
 	if err != nil {
 		return nil, fmt.Errorf("%w: unable to create GraphQL client", err)
 	}
@@ -109,13 +124,14 @@ func NewClient(url string, params *params.ChainConfig, skipAdminCalls bool, head
 	}
 
 	return &Client{
-		p:               params,
+		p:               cfg.ChainConfig,
 		tc:              tc,
 		c:               c,
 		g:               g,
 		currencyFetcher: currencyFetcher,
 		traceSemaphore:  semaphore.NewWeighted(maxTraceConcurrency),
-		skipAdminCalls:  skipAdminCalls,
+		skipAdminCalls:  cfg.SkipAdminCalls,
+		burntContract:   cfg.BurntContract,
 	}, nil
 }
 
@@ -350,13 +366,19 @@ func (ec *Client) getBlock(
 	for i, tx := range body.Transactions {
 		txs[i] = tx.tx
 		receipt := receipts[i]
-		gasUsedBig := new(big.Int).SetUint64(receipt.GasUsed)
-		feeAmount := gasUsedBig.Mul(gasUsedBig, txs[i].GasPrice())
-
+		gasUsed := new(big.Int).SetUint64(receipt.GasUsed)
+		gasPrice, err := effectiveGasPrice(txs[i], head.BaseFee)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: failure getting gas price", err)
+		}
 		loadedTxs[i] = tx.LoadedTransaction()
 		loadedTxs[i].Transaction = txs[i]
-		loadedTxs[i].FeeAmount = feeAmount
-		loadedTxs[i].Miner = MustChecksum(head.Coinbase.Hex())
+		loadedTxs[i].FeeAmount = new(big.Int).Mul(gasUsed, gasPrice)
+		if head.BaseFee != nil { // EIP-1559
+			loadedTxs[i].FeeBurned = new(big.Int).Mul(gasUsed, head.BaseFee)
+		} else {
+			loadedTxs[i].FeeBurned = nil
+		}
 		loadedTxs[i].Author = MustChecksum(blockAuthor.Address)
 		loadedTxs[i].Receipt = receipt
 
@@ -376,6 +398,21 @@ func (ec *Client) getBlock(
 
 	uncles := []*types.Header{} // no uncles in polygon
 	return types.NewBlockWithHeader(&head).WithBody(txs, uncles), loadedTxs, nil
+}
+
+// effectiveGasPrice returns the price of gas charged to this transaction to be included in the
+// block.
+func effectiveGasPrice(tx *EthTypes.Transaction, baseFee *big.Int) (*big.Int, error) {
+	if tx.Type() != eip1559TxType {
+		return tx.GasPrice(), nil
+	}
+	// For EIP-1559 the gas price is determined by the base fee & miner tip instead
+	// of the tx-specified gas price.
+	tip, err := tx.EffectiveGasTip(baseFee)
+	if err != nil {
+		return nil, err
+	}
+	return new(big.Int).Add(tip, baseFee), nil
 }
 
 func getStateSyncTraces(receipt *types.Receipt) (*Call, json.RawMessage) {
@@ -914,6 +951,7 @@ func (tx *rpcTransaction) LoadedTransaction() *loadedTransaction {
 		From:        tx.txExtraInfo.From,
 		BlockNumber: tx.txExtraInfo.BlockNumber,
 		BlockHash:   tx.txExtraInfo.BlockHash,
+		TxHash:      tx.TxHash,
 	}
 	return ethTx
 }
@@ -923,8 +961,9 @@ type loadedTransaction struct {
 	From        *common.Address
 	BlockNumber *string
 	BlockHash   *common.Hash
+	TxHash      *common.Hash // may not equal Transaction.Hash() due to state sync indicator
 	FeeAmount   *big.Int
-	Miner       string
+	FeeBurned   *big.Int // nil if no fees were burned
 	Author      string
 	Status      bool
 
@@ -933,8 +972,18 @@ type loadedTransaction struct {
 	Receipt  *types.Receipt
 }
 
-func feeOps(tx *loadedTransaction) []*RosettaTypes.Operation {
-	return []*RosettaTypes.Operation{
+func (ec *Client) feeOps(tx *loadedTransaction, block *EthTypes.Block) []*RosettaTypes.Operation {
+	if tx.FeeAmount.Cmp(new(big.Int)) == 0 {
+		// This can happen for state sync transactions
+		return []*RosettaTypes.Operation{}
+	}
+	var minerEarnedAmount *big.Int
+	if tx.FeeBurned == nil {
+		minerEarnedAmount = tx.FeeAmount
+	} else {
+		minerEarnedAmount = new(big.Int).Sub(tx.FeeAmount, tx.FeeBurned)
+	}
+	rOps := []*RosettaTypes.Operation{
 		{
 			OperationIdentifier: &RosettaTypes.OperationIdentifier{
 				Index: 0,
@@ -945,11 +994,10 @@ func feeOps(tx *loadedTransaction) []*RosettaTypes.Operation {
 				Address: MustChecksum(tx.From.String()),
 			},
 			Amount: &RosettaTypes.Amount{
-				Value:    new(big.Int).Neg(tx.FeeAmount).String(),
+				Value:    new(big.Int).Neg(minerEarnedAmount).String(),
 				Currency: Currency,
 			},
 		},
-
 		{
 			OperationIdentifier: &RosettaTypes.OperationIdentifier{
 				Index: 1,
@@ -965,11 +1013,52 @@ func feeOps(tx *loadedTransaction) []*RosettaTypes.Operation {
 				Address: MustChecksum(tx.Author),
 			},
 			Amount: &RosettaTypes.Amount{
-				Value:    tx.FeeAmount.String(),
+				Value:    minerEarnedAmount.String(),
 				Currency: Currency,
 			},
 		},
 	}
+
+	if tx.FeeBurned == nil {
+		return rOps
+	}
+
+	// Burnt fees, if any, need to go to the burn contract.
+	burntContract := ec.CalculateBurntContract(block.NumberU64())
+	debitOp := &RosettaTypes.Operation{
+		OperationIdentifier: &RosettaTypes.OperationIdentifier{
+			Index: 2,
+		},
+		Type:   FeeOpType,
+		Status: RosettaTypes.String(SuccessStatus),
+		Account: &RosettaTypes.AccountIdentifier{
+			Address: MustChecksum(tx.From.String()),
+		},
+		Amount: &RosettaTypes.Amount{
+			Value:    new(big.Int).Neg(tx.FeeBurned).String(),
+			Currency: Currency,
+		},
+	}
+	creditOp := &RosettaTypes.Operation{
+		OperationIdentifier: &RosettaTypes.OperationIdentifier{
+			Index: 3,
+		},
+		RelatedOperations: []*RosettaTypes.OperationIdentifier{
+			{
+				Index: 2,
+			},
+		},
+		Type:   FeeOpType,
+		Status: RosettaTypes.String(SuccessStatus),
+		Account: &RosettaTypes.AccountIdentifier{
+			Address: MustChecksum(burntContract),
+		},
+		Amount: &RosettaTypes.Amount{
+			Value:    tx.FeeBurned.String(),
+			Currency: Currency,
+		},
+	}
+	return append(rOps, debitOp, creditOp)
 }
 
 // transactionReceipt returns the receipt of a transaction by transaction hash.
@@ -1038,25 +1127,14 @@ func (ec *Client) populateTransactions(
 	block *EthTypes.Block,
 	loadedTransactions []*loadedTransaction,
 ) ([]*RosettaTypes.Transaction, error) {
-	transactions := make(
-		[]*RosettaTypes.Transaction,
-		len(block.Transactions())+1, // include reward tx
-	)
-
-	// Compute reward transaction (block + uncle reward)
-	// Always goes to nil address in polygon (and zero value)
-	transactions[0] = ec.blockRewardTransaction(
-		blockIdentifier,
-		block.Coinbase().String(),
-	)
-
+	transactions := make([]*RosettaTypes.Transaction, len(block.Transactions()))
 	for i, tx := range loadedTransactions {
-		transaction, err := ec.populateTransaction(ctx, tx)
+		transaction, err := ec.populateTransaction(ctx, tx, block)
 		if err != nil {
 			return nil, fmt.Errorf("%w: cannot parse %s", err, tx.Transaction.Hash().Hex())
 		}
 
-		transactions[i+1] = transaction
+		transactions[i] = transaction
 	}
 
 	return transactions, nil
@@ -1065,11 +1143,12 @@ func (ec *Client) populateTransactions(
 func (ec *Client) populateTransaction(
 	ctx context.Context,
 	tx *loadedTransaction,
+	block *EthTypes.Block,
 ) (*RosettaTypes.Transaction, error) {
 	ops := []*RosettaTypes.Operation{}
 
 	// Compute fee operations
-	feeOps := feeOps(tx)
+	feeOps := ec.feeOps(tx, block)
 	ops = append(ops, feeOps...)
 
 	// Compute tx operations via tx.Receipt logs for ERC20 transfers
@@ -1105,7 +1184,7 @@ func (ec *Client) populateTransaction(
 
 	populatedTransaction := &RosettaTypes.Transaction{
 		TransactionIdentifier: &RosettaTypes.TransactionIdentifier{
-			Hash: tx.Transaction.Hash().Hex(),
+			Hash: tx.TxHash.Hex(),
 		},
 		Operations: ops,
 		Metadata: map[string]interface{}{
@@ -1117,47 +1196,6 @@ func (ec *Client) populateTransaction(
 	}
 
 	return populatedTransaction, nil
-}
-
-// Polygon has no mining reward
-func (ec *Client) miningReward(
-	*big.Int,
-) int64 {
-	return big.NewInt(0).Int64()
-}
-
-func (ec *Client) blockRewardTransaction(
-	blockIdentifier *RosettaTypes.BlockIdentifier,
-	miner string,
-) *RosettaTypes.Transaction {
-	var ops []*RosettaTypes.Operation
-	miningReward := ec.miningReward(big.NewInt(blockIdentifier.Index))
-
-	// Calculate miner rewards
-	minerReward := miningReward
-
-	miningRewardOp := &RosettaTypes.Operation{
-		OperationIdentifier: &RosettaTypes.OperationIdentifier{
-			Index: 0,
-		},
-		Type:   MinerRewardOpType,
-		Status: RosettaTypes.String(SuccessStatus),
-		Account: &RosettaTypes.AccountIdentifier{
-			Address: MustChecksum(miner),
-		},
-		Amount: &RosettaTypes.Amount{
-			Value:    strconv.FormatInt(minerReward, 10),
-			Currency: Currency,
-		},
-	}
-	ops = append(ops, miningRewardOp)
-
-	return &RosettaTypes.Transaction{
-		TransactionIdentifier: &RosettaTypes.TransactionIdentifier{
-			Hash: blockIdentifier.Hash,
-		},
-		Operations: ops,
-	}
 }
 
 func (ec *Client) blockAuthor(ctx context.Context, blockIndex int64) (*RosettaTypes.AccountIdentifier, error) {
@@ -1477,4 +1515,25 @@ func toCallArg(msg ethereum.CallMsg) interface{} {
 		arg["gasPrice"] = (*hexutil.Big)(msg.GasPrice)
 	}
 	return arg
+}
+
+// This implementation is taken from:
+// https://github.com/maticnetwork/bor/blob/c227a072418626dd758ceabffd2ea7dadac6eecb/params/config.go#L527
+//
+// TODO: Depend on maticnetwork fork of go-ethereum instead of stock geth so we don't need to
+// copy/paste this.
+func (ec *Client) CalculateBurntContract(blockNum uint64) string {
+	keys := make([]string, 0, len(ec.burntContract))
+	for k := range ec.burntContract {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i := 0; i < len(keys)-1; i++ {
+		valUint, _ := strconv.ParseUint(keys[i], 10, 64)
+		valUintNext, _ := strconv.ParseUint(keys[i+1], 10, 64)
+		if blockNum > valUint && blockNum < valUintNext {
+			return ec.burntContract[keys[i]]
+		}
+	}
+	return ec.burntContract[keys[len(keys)-1]]
 }

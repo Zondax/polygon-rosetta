@@ -43,6 +43,16 @@ const (
 	invalidContractAddressTooShort      = "0xdeadbeef"
 	invalidContractAddressMissingPrefix = "deadbeef"
 
+	// mumbai currency
+	invalidWETHContractAddress = "0x00dD3599Ae4813F3528C0d532851B937Cee1B489"
+	invalidWETHSymbol          = "WETH"
+	invalidWETHDecimals        = 0 // raw payload overflow
+
+	// mainnet currency
+	invalidXSDOContractAddress = "0x9A28226CF889Af5B7339CD3117978F5216b72d05"
+	invalidXSDOSymbol          = "XSDO"
+	invalidXSDODecimals        = 0 // raw payload returns 18000000000000000000, resulting in overflow
+
 	unknownContractAddress = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
@@ -75,6 +85,22 @@ var unknownCurrency = &RosettaTypes.Currency{
 	Decimals: int32(defaultERC20Decimals),
 	Metadata: map[string]interface{}{
 		ContractAddressKey: unknownContractAddress,
+	},
+}
+
+var invalidWETHCurrency = &RosettaTypes.Currency{
+	Symbol:   invalidWETHSymbol,
+	Decimals: int32(invalidWETHDecimals),
+	Metadata: map[string]interface{}{
+		ContractAddressKey: invalidWETHContractAddress,
+	},
+}
+
+var invalidXSDOCurrency = &RosettaTypes.Currency{
+	Symbol:   invalidXSDOSymbol,
+	Decimals: int32(invalidXSDODecimals),
+	Metadata: map[string]interface{}{
+		ContractAddressKey: invalidXSDOContractAddress,
 	},
 }
 
@@ -154,6 +180,28 @@ func TestFetchCurrency(t *testing.T) {
 			expectedCurrency: emptySymbolCurrency,
 			decimals:         emptySymbolDecimals,
 			symbol:           defaultERC20Symbol,
+			mockFn: func(mockGraphQL *mocks.GraphQL, contractAddress string) {
+				mockFetchDecimals(t, mockGraphQL, contractAddress)
+				mockFetchSymbol(t, mockGraphQL, contractAddress)
+			},
+			error: nil,
+		},
+		"happy path: overflow (> int32) token decimals parsed as 0": {
+			contractAddress:  invalidWETHContractAddress,
+			expectedCurrency: invalidWETHCurrency,
+			decimals:         invalidWETHDecimals,
+			symbol:           invalidWETHSymbol,
+			mockFn: func(mockGraphQL *mocks.GraphQL, contractAddress string) {
+				mockFetchDecimals(t, mockGraphQL, contractAddress)
+				mockFetchSymbol(t, mockGraphQL, contractAddress)
+			},
+			error: nil,
+		},
+		"happy path: overflow (> int64) token decimals parsed as 0": {
+			contractAddress:  invalidXSDOContractAddress,
+			expectedCurrency: invalidXSDOCurrency,
+			decimals:         invalidXSDODecimals,
+			symbol:           invalidXSDOSymbol,
 			mockFn: func(mockGraphQL *mocks.GraphQL, contractAddress string) {
 				mockFetchDecimals(t, mockGraphQL, contractAddress)
 				mockFetchSymbol(t, mockGraphQL, contractAddress)
