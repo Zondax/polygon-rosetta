@@ -18,6 +18,7 @@ set -e
 bash /app/assets/${NETWORK}/heimdall/setup.sh
 SEEDS=$(cat /app/assets/${NETWORK}/heimdall/heimdall-seeds.txt)
 sed -i "/seeds = \"\"/c\\$SEEDS" $HOME/.heimdalld/config/config.toml
+sed -i "/prometheus = false/c\\prometheus = true" $HOME/.heimdalld/config/config.toml
 
 heimdalld rest-server &
 exec heimdalld start --rpc.laddr tcp://0.0.0.0:26657
