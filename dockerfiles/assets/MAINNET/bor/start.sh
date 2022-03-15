@@ -44,4 +44,8 @@ bor --datadir $DATA_DIR \
   --graphql \
   --graphql.vhosts '*' \
   --bor.logs \
-  --pprof --pprof.port 7071 --pprof.addr '0.0.0.0'
+  --pprof --pprof.port 7071 --pprof.addr '0.0.0.0' \
+  --ws \
+  --ws.addr "0.0.0.0" \
+  --ws.port 8546 \
+  --ws.api 'eth,net,web3,txpool,bor,debug,admin'
